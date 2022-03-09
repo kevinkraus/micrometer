@@ -78,6 +78,10 @@ import java.util.function.Predicate;
 @Incubating(since = "1.0.0")
 public class TimedAspect {
     private static final Predicate<ProceedingJoinPoint> DONT_SKIP_ANYTHING = pjp -> false;
+    private static final Function<Object, Iterable<Tag>> TAKE_NO_ACTION_ON_RESULT = obj -> Tags.of((Tag)null);
+    private static final Function<ProceedingJoinPoint, Iterable<Tag>> DEFAULT_TAGS_BASED_ON_JOINPOINT = pjp -> Tags.of("class", pjp.getStaticPart().getSignature().getDeclaringTypeName(),
+            "method", pjp.getStaticPart().getSignature().getName());
+
     public static final String DEFAULT_METRIC_NAME = "method.timed";
     public static final String DEFAULT_EXCEPTION_TAG_VALUE = "none";
 
@@ -91,6 +95,7 @@ public class TimedAspect {
     private final MeterRegistry registry;
     private final Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint;
     private final Predicate<ProceedingJoinPoint> shouldSkip;
+    private final Function<Object, Iterable<Tag>> tagsBasedOnResult;
 
     /**
      * Creates a {@code TimedAspect} instance with {@link Metrics#globalRegistry}.
@@ -117,7 +122,7 @@ public class TimedAspect {
      * @param tagsBasedOnJoinPoint A function to generate tags given a join point.
      */
     public TimedAspect(MeterRegistry registry, Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint) {
-        this(registry, tagsBasedOnJoinPoint, DONT_SKIP_ANYTHING);
+        this(registry, tagsBasedOnJoinPoint, DONT_SKIP_ANYTHING, TAKE_NO_ACTION_ON_RESULT);
     }
 
     /**
@@ -130,9 +135,9 @@ public class TimedAspect {
     public TimedAspect(MeterRegistry registry, Predicate<ProceedingJoinPoint> shouldSkip) {
         this(
                 registry,
-                pjp -> Tags.of("class", pjp.getStaticPart().getSignature().getDeclaringTypeName(),
-                        "method", pjp.getStaticPart().getSignature().getName()),
-                shouldSkip
+                DEFAULT_TAGS_BASED_ON_JOINPOINT,
+                shouldSkip,
+                TAKE_NO_ACTION_ON_RESULT
         );
     }
 
@@ -145,9 +150,14 @@ public class TimedAspect {
      * @since 1.7.0
      */
     public TimedAspect(MeterRegistry registry, Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint, Predicate<ProceedingJoinPoint> shouldSkip) {
+        this(registry, tagsBasedOnJoinPoint, shouldSkip, TAKE_NO_ACTION_ON_RESULT);
+    }
+
+    private TimedAspect(MeterRegistry registry, Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint, Predicate<ProceedingJoinPoint> shouldSkip, Function<Object, Iterable<Tag>> tagsBasedOnResult) {
         this.registry = registry;
         this.tagsBasedOnJoinPoint = tagsBasedOnJoinPoint;
         this.shouldSkip = shouldSkip;
+        this.tagsBasedOnResult = tagsBasedOnResult;
     }
 
     @Around("execution (@io.micrometer.core.annotation.Timed * *.*(..))")
@@ -179,32 +189,39 @@ public class TimedAspect {
 
         if (stopWhenCompleted) {
             try {
-                return ((CompletionStage<?>) pjp.proceed()).whenComplete((result, throwable) ->
-                        record(pjp, timed, metricName, sample, getExceptionTag(throwable)));
+                return ((CompletionStage<?>) pjp.proceed()).whenComplete((result, throwable) -> {
+                    Iterable<Tag> resultTags = tagsBasedOnResult.apply(result);
+                    record(pjp, timed, metricName, sample, getExceptionTag(throwable), resultTags);
+                });
             } catch (Exception ex) {
-                record(pjp, timed, metricName, sample, ex.getClass().getSimpleName());
+                record(pjp, timed, metricName, sample, ex.getClass().getSimpleName(), Tags.of("resultCode", "1"));
                 throw ex;
             }
         }
 
+        Iterable<Tag> resultTags = Tags.empty();
         String exceptionClass = DEFAULT_EXCEPTION_TAG_VALUE;
+
         try {
-            return pjp.proceed();
+            Object proceed = pjp.proceed();
+            resultTags = tagsBasedOnResult.apply(proceed);
+            return proceed;
         } catch (Exception ex) {
             exceptionClass = ex.getClass().getSimpleName();
             throw ex;
         } finally {
-            record(pjp, timed, metricName, sample, exceptionClass);
+            record(pjp, timed, metricName, sample, exceptionClass, resultTags);
         }
     }
 
-    private void record(ProceedingJoinPoint pjp, Timed timed, String metricName, Timer.Sample sample, String exceptionClass) {
+    private void record(ProceedingJoinPoint pjp, Timed timed, String metricName, Timer.Sample sample, String exceptionClass, Iterable<Tag> resultTags) {
         try {
             sample.stop(Timer.builder(metricName)
                     .description(timed.description().isEmpty() ? null : timed.description())
                     .tags(timed.extraTags())
                     .tags(EXCEPTION_TAG, exceptionClass)
                     .tags(tagsBasedOnJoinPoint.apply(pjp))
+                    .tags(resultTags)
                     .publishPercentileHistogram(timed.histogram())
                     .publishPercentiles(timed.percentiles().length == 0 ? null : timed.percentiles())
                     .register(registry));
@@ -266,6 +283,36 @@ public class TimedAspect {
                                        .register(registry));
         } catch (Exception e) {
             return Optional.empty();
+        }
+    }
+
+    public static class Builder {
+        private final MeterRegistry registry;
+        private Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint = DEFAULT_TAGS_BASED_ON_JOINPOINT;
+        private Predicate<ProceedingJoinPoint> shouldSkip = DONT_SKIP_ANYTHING;
+        private Function<Object, Iterable<Tag>> tagsBasedOnResult = TAKE_NO_ACTION_ON_RESULT;
+
+        public Builder(MeterRegistry registry) {
+            this.registry = registry;
+        }
+
+        public Builder tagsBasedOnJoinPoint(Function<ProceedingJoinPoint, Iterable<Tag>> tagsBasedOnJoinPoint) {
+            this.tagsBasedOnJoinPoint = tagsBasedOnJoinPoint;
+            return this;
+        }
+
+        public Builder tagsBasedOnResult(Function<Object, Iterable<Tag>> tagsBasedOnResult) {
+            this.tagsBasedOnResult = tagsBasedOnResult;
+            return this;
+        }
+
+        public Builder shouldSkip(Predicate<ProceedingJoinPoint> shouldSkip) {
+            this.shouldSkip = shouldSkip;
+            return this;
+        }
+
+        public TimedAspect build() {
+            return new TimedAspect(registry, tagsBasedOnJoinPoint, shouldSkip, tagsBasedOnResult);
         }
     }
 }

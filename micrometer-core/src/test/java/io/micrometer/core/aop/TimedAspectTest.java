@@ -16,10 +16,8 @@
 package io.micrometer.core.aop;
 
 import io.micrometer.core.annotation.Timed;
-import io.micrometer.core.instrument.LongTaskTimer;
+import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.Meter.Id;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
@@ -289,6 +287,89 @@ class TimedAspectTest {
         });
     }
 
+    @Test
+    void timeMethodWithResultTags() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+
+        AspectJProxyFactory pf = new AspectJProxyFactory(new TimedService());
+        TimedAspect timedAspect = new TimedAspect.Builder(registry).tagsBasedOnResult(obj ->
+                obj != null ? Tags.of("resultCode", String.valueOf(obj)) : Tags.empty()
+        ).build();
+        pf.addAspect(timedAspect);
+
+        TimedService service = pf.getProxy();
+
+        service.callWithBooleanReturnValue();
+
+        assertThat(registry.get("callWithBooleanReturnValue")
+                .tag("class", this.getClass().getName() + "$TimedService")
+                .tag("method", "callWithBooleanReturnValue")
+                .tag("resultCode", "true")
+                .timer().count()).isEqualTo(1);
+    }
+
+    @Test
+    void timeMethodWithLongTaskTimerWithResultTags() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+
+        AspectJProxyFactory pf = new AspectJProxyFactory(new TimedService());
+        TimedAspect timedAspect = new TimedAspect.Builder(registry).tagsBasedOnResult(obj ->
+                obj != null ? Tags.of("resultCode", String.valueOf(obj)) : Tags.empty()
+        ).build();
+        pf.addAspect(timedAspect);
+
+        TimedService service = pf.getProxy();
+
+        service.longCallWithBooleanReturnValue();
+
+        assertThat(registry.get("longCallWithBooleanReturnValue")
+                .tag("class", this.getClass().getName() + "$TimedService")
+                .tag("method", "longCallWithBooleanReturnValue")
+                .tag("resultCode", "true")
+                .longTaskTimers().size()).isEqualTo(1);
+    }
+
+/*
+    @Test
+    void timeMethodLongCallWithResultTags() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+
+        AspectJProxyFactory pf = new AspectJProxyFactory(new AsyncTimedService());
+        TimedAspect timedAspect = new TimedAspect.Builder(registry).tagsBasedOnResult(obj ->
+                obj != null ? Tags.of("resultCode", String.valueOf(obj)) : Tags.empty()
+        ).build();
+        pf.addAspect(timedAspect);
+
+        AsyncTimedService service = pf.getProxy();
+
+        GuardedResult guardedResult = new GuardedResult();
+        CompletableFuture<?> completableFuture = service.(guardedResult);
+
+        assertThat(registry.find("longCall")
+                .tag("class", this.getClass().getName() + "$AsyncTimedService")
+                .tag("method", "longCall")
+                .tag("extra", "tag")
+                .longTaskTimer().activeTasks()).isEqualTo(1);
+
+        guardedResult.complete();
+        completableFuture.join();
+
+        assertThat(registry.get("longCall")
+                .tag("class", this.getClass().getName() + "$AsyncTimedService")
+                .tag("method", "longCall")
+                .tag("extra", "tag")
+                .longTaskTimer().activeTasks()).isEqualTo(0);
+
+        service.callWithBooleanReturnValue();
+
+        assertThat(registry.get("callWithBooleanReturnValue")
+                .tag("class", this.getClass().getName() + "$TimedService")
+                .tag("method", "callWithBooleanReturnValue")
+                .tag("resultCode", "true")
+                .timer().count()).isEqualTo(1);
+    }
+*/
+
     private final class FailingMeterRegistry extends SimpleMeterRegistry {
         private FailingMeterRegistry() {
             super();
@@ -316,6 +397,16 @@ class TimedAspectTest {
 
         @Timed(value = "longCall", extraTags = {"extra", "tag"}, longTask = true)
         void longCall() {
+        }
+
+        @Timed(value = "callWithBooleanReturnValue")
+        boolean callWithBooleanReturnValue() {
+            return true;
+        }
+
+        @Timed(value = "longCallWithBooleanReturnValue", longTask = true)
+        boolean longCallWithBooleanReturnValue() {
+            return true;
         }
     }
 
